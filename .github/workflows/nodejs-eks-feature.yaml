@@ -17,7 +17,7 @@ jobs:
  build-nodejs:
   runs-on:
    group: roboshop
-   labels: roboshop,nodejs-dev
+   labels: [roboshop, nodejs-dev]
   steps:
  #its like git clone of whatever in our catalogue repository
   - name: code checkout
