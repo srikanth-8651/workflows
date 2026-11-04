@@ -1,0 +1,37 @@
+name: nodejsEKs feature
+on:
+  workflow_call: #Defining the inputs here by the name project& component
+    inputs:
+      project:
+        description: 'Project name'
+        required: true
+        type: string
+      component:
+        description: 'Component name'
+        required: true
+        type: string
+env:
+ project: ${{ inputs.project }}  #we can accessing here with inputs.
+ component: ${{ inputs.component }}
+jobs:
+ build-nodejs:
+  runs-on:
+   group: roboshop
+   labels: roboshop,nodejs-dev
+  steps:
+ #its like git clone of whatever in our catalogue repository
+  - name: code checkout
+    uses: actions/checkout@v4
+#Listing the files
+  - name: Listing files
+    run: |
+      ls -l
+  #Reading Version 
+  - name: Read version
+    id: version    #reference use for printing version
+    run: |
+      VERSION=$(jq -r '.version' package.json)
+      echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+  - name: Prinitng Version
+    run: echo "Version is ${{ steps.version.outputs.version }}"
