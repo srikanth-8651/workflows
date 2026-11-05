@@ -35,3 +35,6 @@ jobs:
 
   - name: Prinitng Version
     run: echo "Version is ${{ steps.version.outputs.version }}"
+
+  - name: Unit-tests
+    run: npm test
