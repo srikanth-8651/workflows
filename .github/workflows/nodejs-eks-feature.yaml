@@ -49,16 +49,16 @@ env:
   org: srikanth-8651
 
 jobs:
-  build-test-deploy:
+  build-test-deploy: ##its first-Job
     runs-on:
-      group: roboshop
-      labels: nodejs-dev
+      group: roboshop  #runner
+      labels: nodejs-dev  #Labels
     permissions:
-      statuses: write
-    # contents: write
-    # pull-requests: write
+      statuses: write  #Github status updated
+      # contents: write
+      # pull-requests: write
     steps:
-      - name: checkout code
+      - name: checkout code  #tsa custom actions like git clone getting all files
         uses: actions/checkout@v4
 
       # mirrors 'read-version' stage — appVersion tags dev images/deploys,

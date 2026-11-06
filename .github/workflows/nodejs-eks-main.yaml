@@ -124,7 +124,7 @@ jobs:
           kubectl rollout status deployment/${component} -n roboshop-dev --timeout=120s
       - name: status-dev-deploy
         if: always() && (steps.dev-deploy.outcome == 'success' || steps.dev-deploy.outcome == 'failure')
-        uses: daws-90s/workflows/.github/actions/commit-status@main
+        uses: srikanth-8651/workflows/.github/actions/commit-status@main
         with:
           state: ${{ steps.dev-deploy.outcome }}
           context: dev-deploy
@@ -149,7 +149,7 @@ jobs:
           gh run watch "$run_id" --repo ${org}/catalogue-api-tests --exit-status
       - name: status-api-tests
         if: always() && (steps.api-tests.outcome == 'success' || steps.api-tests.outcome == 'failure')
-        uses: daws-90s/workflows/.github/actions/commit-status@main
+        uses: srikanth-8651/workflows/.github/actions/commit-status@main
         with:
           state: ${{ steps.api-tests.outcome }}
           context: api-tests
@@ -225,7 +225,7 @@ jobs:
           docker push ${registry}/${project}/${component}:${{ github.sha }}
       - name: status-promote-image
         if: always() && (steps.promote-image.outcome == 'success' || steps.promote-image.outcome == 'failure')
-        uses: daws-90s/workflows/.github/actions/commit-status@main
+        uses: srikanth-8651/workflows/.github/actions/commit-status@main
         with:
           state: ${{ steps.promote-image.outcome }}
           context: promote-image
@@ -281,18 +281,20 @@ jobs:
             --wait --timeout 5m
 
           kubectl rollout status deployment/${component} -n roboshop-sit --timeout=120s
+
       - name: status-sit-deploy
         if: always() && (steps.sit-deploy.outcome == 'success' || steps.sit-deploy.outcome == 'failure')
-        uses: daws-90s/workflows/.github/actions/commit-status@main
+        uses: srikanth-8651/workflows/.github/actions/commit-status@main
         with:
           state: ${{ steps.sit-deploy.outcome }}
           context: sit-deploy
           description: ${{ steps.sit-deploy.outcome == 'success' && format('Deployed {0} to roboshop-sit', inputs.commit_id) || 'Deploy to roboshop-sit failed' }}
           token: ${{ github.token }}
           sha: ${{ inputs.commit_id }}
+
       - name: transition-jira-sit-failed
         if: failure() && steps.sit-deploy.outcome == 'failure' && inputs.issue_key != ''
-        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        uses: srikanth-8651/workflows/.github/actions/jira-transition-issue@main
         with:
           issue_key: ${{ inputs.issue_key }}
           target_status: 'SIT FAILED'
@@ -302,31 +304,32 @@ jobs:
 
       - name: get-pod-ip catalogue
         id: pod-catalogue
-        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        uses: srikanth-8651/workflows/.github/actions/get-pod-ip@main
         with:
           namespace: roboshop-sit
           component: catalogue
       - name: get-pod-ip cart
         id: pod-cart
-        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        uses: srikanth-8651/workflows/.github/actions/get-pod-ip@main
         with:
           namespace: roboshop-sit
           component: cart
+
       - name: get-pod-ip user
         id: pod-user
-        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        uses: srikanth-8651/workflows/.github/actions/get-pod-ip@main
         with:
           namespace: roboshop-sit
           component: user
       - name: get-pod-ip shipping
         id: pod-shipping
-        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        uses: srikanth-8651/workflows/.github/actions/get-pod-ip@main
         with:
           namespace: roboshop-sit
           component: shipping
       - name: get-pod-ip payment
         id: pod-payment
-        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        uses: srikanth-8651/workflows/.github/actions/get-pod-ip@main
         with:
           namespace: roboshop-sit
           component: payment
@@ -359,16 +362,17 @@ jobs:
           sha: ${{ inputs.commit_id }}
       - name: transition-jira-sit-done
         if: steps.sit-integration-tests.outcome == 'success' && inputs.issue_key != ''
-        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        uses: srikanth-8651/workflows/.github/actions/jira-transition-issue@main
         with:
           issue_key: ${{ inputs.issue_key }}
           target_status: 'SIT Done'
           jira_base_url: ${{ secrets.JIRA_BASE_URL }}
           jira_email: ${{ secrets.JIRA_EMAIL }}
           jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+
       - name: transition-jira-sit-failed-integration
         if: failure() && steps.sit-integration-tests.outcome == 'failure' && inputs.issue_key != ''
-        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        uses: srikanth-8651/workflows/.github/actions/jira-transition-issue@main
         with:
           issue_key: ${{ inputs.issue_key }}
           target_status: 'SIT FAILED'
@@ -491,6 +495,7 @@ jobs:
           sleep 10
           run_id=$(gh run list --repo ${org}/roboshop-regression-tests --workflow=regression-tests.yaml --json databaseId,createdAt --jq 'sort_by(.createdAt) | last | .databaseId')
           gh run watch "$run_id" --repo ${org}/roboshop-regression-tests --exit-status
+
       - name: status-uat-regression-tests
         if: always() && (steps.uat-regression-tests.outcome == 'success' || steps.uat-regression-tests.outcome == 'failure')
         uses: daws-90s/workflows/.github/actions/commit-status@main
@@ -500,9 +505,10 @@ jobs:
           description: ${{ steps.uat-regression-tests.outcome == 'success' && 'roboshop-regression-tests passed' || 'roboshop-regression-tests failed' }}
           token: ${{ github.token }}
           sha: ${{ inputs.commit_id }}
+
       - name: transition-jira-uat-done
         if: steps.uat-regression-tests.outcome == 'success' && inputs.issue_key != ''
-        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        uses: srikanth-8651/workflows/.github/actions/jira-transition-issue@main
         with:
           issue_key: ${{ inputs.issue_key }}
           target_status: 'UAT Done'
@@ -511,7 +517,7 @@ jobs:
           jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
       - name: transition-jira-uat-failed-regression
         if: failure() && steps.uat-regression-tests.outcome == 'failure' && inputs.issue_key != ''
-        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        uses:  srikanth-8651/workflows/.github/actions/jira-transition-issue@main
         with:
           issue_key: ${{ inputs.issue_key }}
           target_status: 'UAT Failed'
