@@ -1,0 +1,26 @@
+name: get-pod-ip
+description: Resolves a running pod's IP by component label — GitHub Actions equivalent of utils.getPodIP() in jenkins-shared-library
+# Runner isn't using the cluster's CoreDNS as its resolver, but it IS in the
+# same VPC as the EKS nodes (and EKS pods get real routable VPC IPs), so route
+# to the pod directly by IP instead of by *.svc.cluster.local DNS.
+inputs:
+  namespace:
+    required: true
+  component:
+    required: true
+outputs:
+  pod_ip:
+    value: ${{ steps.get-ip.outputs.pod_ip }}
+runs:
+  using: composite
+  steps:
+    - id: get-ip
+      shell: bash
+      run: |
+        set -e
+        ip=$(kubectl get pod -n ${{ inputs.namespace }} -l component=${{ inputs.component }} -o jsonpath='{.items[0].status.podIP}')
+        if [ -z "$ip" ]; then
+          echo "Could not resolve a pod IP for component '${{ inputs.component }}' in namespace '${{ inputs.namespace }}' — is it deployed and running?"
+          exit 1
+        fi
+        echo "pod_ip=$ip" >> "$GITHUB_OUTPUT"

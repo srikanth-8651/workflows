@@ -1,0 +1,689 @@
+name: nodejs-eks-main
+# Reusable workflow, called by a component repo's main-branch job — the GitHub
+# Actions equivalent of nodejsEKSMain.groovy in jenkins-shared-library. One
+# parameterized definition for the whole dev-redeploy -> sit -> uat -> prod
+# promotion chain, instead of copy-pasting it into every nodejs service.
+#
+# Trigger model: Jenkins used a GenericTrigger webhook (Jira Automation posting
+# ENVIRONMENT/COMMIT_ID/etc as JSON) layered on top of manual "Build with
+# Parameters". GitHub Actions has no direct GenericTrigger equivalent for a
+# reusable workflow — Jira Automation (or a human) should instead call the
+# calling repo's own workflow_dispatch (which forwards these same inputs into
+# this workflow via `with:`), e.g. `gh workflow run feature.yaml -f
+# environment=sit -f commit_id=... --repo daws-90s/catalogue`.
+#
+# CR gate: Jenkins used a blocking `input` step. Here that's the
+# `prod-cr-approval` job's `environment:` — configure a GitHub Environment of
+# that name on the CALLING repo (Settings -> Environments -> New environment ->
+# add required reviewers) for the same manual-approval behavior.
+#
+# EKS RBAC note: the runner's access entry (roboshop-infra-eks-dev/50-access-entries)
+# currently only grants AmazonEKSViewPolicy (read-only) on these namespaces.
+# `helm upgrade --install` below needs WRITE access — that access-policy
+# association will need widening (e.g. AmazonEKSEditPolicy) before dev/sit/uat/prod
+# deploy jobs here can actually succeed.
+#
+# Secrets this workflow needs from the caller (pass `secrets: inherit` from a
+# caller in the same org, or list them explicitly):
+#   GH_PAT                                         - trigger catalogue-api-tests /
+#                                                     roboshop-integration-tests /
+#                                                     roboshop-regression-tests in
+#                                                     their own repos
+#   JIRA_BASE_URL / JIRA_EMAIL / JIRA_API_TOKEN     - create/transition the Jira
+#                                                     release ticket (Jira Cloud
+#                                                     REST API v3, replacing the
+#                                                     JIRA Pipeline Steps plugin)
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: 'Project name'
+        required: true
+        type: string
+      component:
+        description: 'Component name'
+        required: true
+        type: string
+      environment:
+        description: "Environment to deploy to: dev, sit, uat or prod"
+        required: true
+        type: string
+      commit_id:
+        description: 'Commit SHA to promote (required for sit/uat/prod)'
+        required: false
+        type: string
+        default: ''
+      cr_number:
+        description: 'Change Request number (required for prod deploy)'
+        required: false
+        type: string
+        default: ''
+      version:
+        description: 'Release version to tag the commit with on a successful prod deploy, e.g. v1.4.0 (required for prod deploy)'
+        required: false
+        type: string
+        default: ''
+      issue_key:
+        description: 'Jira ticket key this run should update (set by the dev run when it creates the ticket; blank for manual promotions with no Jira tracking)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      GH_PAT:
+        required: true
+      JIRA_BASE_URL:
+        required: true
+      JIRA_EMAIL:
+        required: true
+      JIRA_API_TOKEN:
+        required: true
+
+env:
+  project: ${{ inputs.project }}
+  component: ${{ inputs.component }}
+  aws_region: us-east-1
+  acc_id: "160885265516"
+  registry: 160885265516.dkr.ecr.us-east-1.amazonaws.com
+  org: daws-90s
+  jira_project_key: DAWS90S
+
+jobs:
+  # mirrors 'read-version' + 'dev-deploy' + 'api-tests' stages — re-verify the
+  # merged commit in dev: redeploy the image built on the feature branch and
+  # re-run api-tests against it before it's considered good.
+  dev-deploy:
+    if: inputs.environment == 'dev'
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    permissions:
+      statuses: write
+    outputs:
+      app_version: ${{ steps.version.outputs.app_version }}
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+
+      - name: read-version
+        id: version
+        run: echo "app_version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: dev-deploy
+        id: dev-deploy
+        run: |
+          set -e
+          aws eks update-kubeconfig --name roboshop --region ${aws_region}
+
+          helm upgrade --install ${component} ./helm \
+            -f ./helm/values-dev.yaml \
+            --namespace roboshop-dev \
+            --create-namespace \
+            --set deployment.imageVersion=${{ steps.version.outputs.app_version }} \
+            --wait --timeout 5m
+
+          kubectl rollout status deployment/${component} -n roboshop-dev --timeout=120s
+      - name: status-dev-deploy
+        if: always() && (steps.dev-deploy.outcome == 'success' || steps.dev-deploy.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.dev-deploy.outcome }}
+          context: dev-deploy
+          description: ${{ steps.dev-deploy.outcome == 'success' && 'Deployed to roboshop-dev' || 'Deploy to roboshop-dev failed' }}
+          token: ${{ github.token }}
+
+      - name: api-tests
+        id: api-tests
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          set -e
+          gh workflow run api-tests.yaml \
+            --repo ${org}/catalogue-api-tests \
+            --ref main \
+            -f namespace=roboshop-dev \
+            -f commit_id=${{ github.sha }}
+
+          sleep 10
+          run_id=$(gh run list --repo ${org}/catalogue-api-tests --workflow=api-tests.yaml --json databaseId,createdAt --jq 'sort_by(.createdAt) | last | .databaseId')
+          echo "watching catalogue-api-tests run $run_id"
+          gh run watch "$run_id" --repo ${org}/catalogue-api-tests --exit-status
+      - name: status-api-tests
+        if: always() && (steps.api-tests.outcome == 'success' || steps.api-tests.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.api-tests.outcome }}
+          context: api-tests
+          description: ${{ steps.api-tests.outcome == 'success' && 'catalogue-api-tests passed' || 'catalogue-api-tests failed' }}
+          token: ${{ github.token }}
+
+  # mirrors 'create-jira-ticket' stage — opens the ticket that tracks this
+  # commit through sit/uat/prod. Not wrapped safe: Jenkins let a failure here
+  # fail the build, since a promotion with no ticket can't be tracked.
+  create-jira-ticket:
+    if: inputs.environment == 'dev'
+    needs: dev-deploy
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    env:
+      JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+      JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+    steps:
+      - name: create-jira-ticket
+        run: |
+          set -e
+          fields=$(curl -sf -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -H "Accept: application/json" \
+            "$JIRA_BASE_URL/rest/api/3/field")
+
+          commit_field_id=$(echo "$fields" | jq -r '.[] | select((.name // "" ) | ascii_downcase == "commit id") | .id' | head -n1)
+          version_field_id=$(echo "$fields" | jq -r '.[] | select((.name // "" ) | ascii_downcase == "version") | .id' | head -n1)
+
+          if [ -z "$commit_field_id" ] || [ -z "$version_field_id" ]; then
+            echo "Could not find the 'Commit ID' / 'Version' custom fields on this Jira site"
+            exit 1
+          fi
+
+          payload=$(jq -n \
+            --arg project "$jira_project_key" \
+            --arg summary "Release ${{ needs.dev-deploy.outputs.app_version }} - ${{ github.sha }}" \
+            --arg commitField "$commit_field_id" \
+            --arg commit "${{ github.sha }}" \
+            --arg versionField "$version_field_id" \
+            --arg version "${{ needs.dev-deploy.outputs.app_version }}" \
+            '{fields: ({project: {key: $project}, issuetype: {name: "Task"}, summary: $summary} + {($commitField): $commit, ($versionField): $version})}')
+
+          response=$(curl -sf -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
+            -X POST -H "Content-Type: application/json" \
+            --data "$payload" \
+            "$JIRA_BASE_URL/rest/api/3/issue")
+
+          issue_key=$(echo "$response" | jq -r '.key')
+          echo "Created Jira ticket $issue_key for ${{ github.sha }} / ${{ needs.dev-deploy.outputs.app_version }}"
+
+  # mirrors 'promote-image' stage — retag the image that just passed
+  # dev/api-tests with the commit SHA, so sit/uat/prod always deploy by an
+  # immutable commit-addressed tag rather than the mutable dev version tag.
+  promote-image:
+    if: inputs.environment == 'dev'
+    needs: dev-deploy
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    permissions:
+      statuses: write
+    steps:
+      - name: promote-image
+        id: promote-image
+        run: |
+          set -e
+          aws ecr get-login-password --region ${aws_region} | docker login --username AWS --password-stdin ${registry}
+
+          docker pull ${registry}/${project}/${component}:${{ needs.dev-deploy.outputs.app_version }}
+          docker tag ${registry}/${project}/${component}:${{ needs.dev-deploy.outputs.app_version }} ${registry}/${project}/${component}:${{ github.sha }}
+          docker push ${registry}/${project}/${component}:${{ github.sha }}
+      - name: status-promote-image
+        if: always() && (steps.promote-image.outcome == 'success' || steps.promote-image.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.promote-image.outcome }}
+          context: promote-image
+          description: ${{ steps.promote-image.outcome == 'success' && format('Promoted image as {0}', github.sha) || 'Image promotion failed' }}
+          token: ${{ github.token }}
+
+  # mirrors 'validate-commit-status' + 'sit-deploy' + 'sit-integration-tests' —
+  # gated on env.commit_id having already passed dev-deploy/api-tests.
+  sit:
+    if: inputs.environment == 'sit'
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    permissions:
+      statuses: write
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+
+      - name: validate-commit-status
+        run: |
+          set -e
+          if [ -z "${{ inputs.commit_id }}" ]; then
+            echo "commit_id is required when deploying to sit"
+            exit 1
+          fi
+
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ inputs.commit_id }}/status" \
+            -o commit-status.json
+
+          failed=0
+          for ctx in dev-deploy api-tests; do
+            state=$(jq -r --arg ctx "$ctx" '.statuses[] | select(.context == $ctx) | .state' commit-status.json | head -n1)
+            echo "context=$ctx state=${state:-missing}"
+            [ "$state" == "success" ] || failed=1
+          done
+          [ "$failed" -eq 0 ] || { echo "One or more required status checks are not successful for commit ${{ inputs.commit_id }}"; exit 1; }
+
+      - name: sit-deploy
+        id: sit-deploy
+        run: |
+          set -e
+          aws eks update-kubeconfig --name roboshop --region ${aws_region}
+
+          helm upgrade --install ${component} ./helm \
+            -f ./helm/values-sit.yaml \
+            --namespace roboshop-sit \
+            --create-namespace \
+            --set deployment.imageVersion=${{ inputs.commit_id }} \
+            --wait --timeout 5m
+
+          kubectl rollout status deployment/${component} -n roboshop-sit --timeout=120s
+      - name: status-sit-deploy
+        if: always() && (steps.sit-deploy.outcome == 'success' || steps.sit-deploy.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.sit-deploy.outcome }}
+          context: sit-deploy
+          description: ${{ steps.sit-deploy.outcome == 'success' && format('Deployed {0} to roboshop-sit', inputs.commit_id) || 'Deploy to roboshop-sit failed' }}
+          token: ${{ github.token }}
+          sha: ${{ inputs.commit_id }}
+      - name: transition-jira-sit-failed
+        if: failure() && steps.sit-deploy.outcome == 'failure' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'SIT FAILED'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+
+      - name: get-pod-ip catalogue
+        id: pod-catalogue
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-sit
+          component: catalogue
+      - name: get-pod-ip cart
+        id: pod-cart
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-sit
+          component: cart
+      - name: get-pod-ip user
+        id: pod-user
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-sit
+          component: user
+      - name: get-pod-ip shipping
+        id: pod-shipping
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-sit
+          component: shipping
+      - name: get-pod-ip payment
+        id: pod-payment
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-sit
+          component: payment
+
+      - name: sit-integration-tests
+        id: sit-integration-tests
+        run: |
+          set -e
+          gh workflow run integration-tests.yaml \
+            --repo ${org}/roboshop-integration-tests \
+            --ref main \
+            -f namespace=roboshop-sit \
+            -f catalogue_url=http://${{ steps.pod-catalogue.outputs.pod_ip }}:8080 \
+            -f cart_url=http://${{ steps.pod-cart.outputs.pod_ip }}:8080 \
+            -f user_url=http://${{ steps.pod-user.outputs.pod_ip }}:8080 \
+            -f shipping_url=http://${{ steps.pod-shipping.outputs.pod_ip }}:8080 \
+            -f payment_url=http://${{ steps.pod-payment.outputs.pod_ip }}:8080
+
+          sleep 10
+          run_id=$(gh run list --repo ${org}/roboshop-integration-tests --workflow=integration-tests.yaml --json databaseId,createdAt --jq 'sort_by(.createdAt) | last | .databaseId')
+          gh run watch "$run_id" --repo ${org}/roboshop-integration-tests --exit-status
+      - name: status-sit-integration-tests
+        if: always() && (steps.sit-integration-tests.outcome == 'success' || steps.sit-integration-tests.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.sit-integration-tests.outcome }}
+          context: sit-integration-tests
+          description: ${{ steps.sit-integration-tests.outcome == 'success' && 'roboshop-integration-tests passed' || 'roboshop-integration-tests failed' }}
+          token: ${{ github.token }}
+          sha: ${{ inputs.commit_id }}
+      - name: transition-jira-sit-done
+        if: steps.sit-integration-tests.outcome == 'success' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'SIT Done'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+      - name: transition-jira-sit-failed-integration
+        if: failure() && steps.sit-integration-tests.outcome == 'failure' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'SIT FAILED'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+
+  # mirrors 'validate-commit-status' + 'uat-deploy' + 'uat-regression-tests'
+  uat:
+    if: inputs.environment == 'uat'
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    permissions:
+      statuses: write
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+
+      - name: validate-commit-status
+        run: |
+          set -e
+          if [ -z "${{ inputs.commit_id }}" ]; then
+            echo "commit_id is required when deploying to uat"
+            exit 1
+          fi
+
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ inputs.commit_id }}/status" \
+            -o commit-status.json
+
+          failed=0
+          for ctx in dev-deploy api-tests sit-deploy sit-integration-tests; do
+            state=$(jq -r --arg ctx "$ctx" '.statuses[] | select(.context == $ctx) | .state' commit-status.json | head -n1)
+            echo "context=$ctx state=${state:-missing}"
+            [ "$state" == "success" ] || failed=1
+          done
+          [ "$failed" -eq 0 ] || { echo "One or more required status checks are not successful for commit ${{ inputs.commit_id }}"; exit 1; }
+
+      - name: uat-deploy
+        id: uat-deploy
+        run: |
+          set -e
+          aws eks update-kubeconfig --name roboshop --region ${aws_region}
+
+          helm upgrade --install ${component} ./helm \
+            -f ./helm/values-uat.yaml \
+            --namespace roboshop-uat \
+            --create-namespace \
+            --set deployment.imageVersion=${{ inputs.commit_id }} \
+            --wait --timeout 5m
+
+          kubectl rollout status deployment/${component} -n roboshop-uat --timeout=120s
+      - name: status-uat-deploy
+        if: always() && (steps.uat-deploy.outcome == 'success' || steps.uat-deploy.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.uat-deploy.outcome }}
+          context: uat-deploy
+          description: ${{ steps.uat-deploy.outcome == 'success' && format('Deployed {0} to roboshop-uat', inputs.commit_id) || 'Deploy to roboshop-uat failed' }}
+          token: ${{ github.token }}
+          sha: ${{ inputs.commit_id }}
+      - name: transition-jira-uat-failed-deploy
+        if: failure() && steps.uat-deploy.outcome == 'failure' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'UAT Failed'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+
+      - name: get-pod-ip catalogue
+        id: pod-catalogue
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-uat
+          component: catalogue
+      - name: get-pod-ip cart
+        id: pod-cart
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-uat
+          component: cart
+      - name: get-pod-ip user
+        id: pod-user
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-uat
+          component: user
+      - name: get-pod-ip shipping
+        id: pod-shipping
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-uat
+          component: shipping
+      - name: get-pod-ip payment
+        id: pod-payment
+        uses: daws-90s/workflows/.github/actions/get-pod-ip@main
+        with:
+          namespace: roboshop-uat
+          component: payment
+
+      - name: uat-regression-tests
+        id: uat-regression-tests
+        run: |
+          set -e
+          gh workflow run regression-tests.yaml \
+            --repo ${org}/roboshop-regression-tests \
+            --ref main \
+            -f namespace=roboshop-uat \
+            -f catalogue_url=http://${{ steps.pod-catalogue.outputs.pod_ip }}:8080 \
+            -f cart_url=http://${{ steps.pod-cart.outputs.pod_ip }}:8080 \
+            -f user_url=http://${{ steps.pod-user.outputs.pod_ip }}:8080 \
+            -f shipping_url=http://${{ steps.pod-shipping.outputs.pod_ip }}:8080 \
+            -f payment_url=http://${{ steps.pod-payment.outputs.pod_ip }}:8080
+
+          sleep 10
+          run_id=$(gh run list --repo ${org}/roboshop-regression-tests --workflow=regression-tests.yaml --json databaseId,createdAt --jq 'sort_by(.createdAt) | last | .databaseId')
+          gh run watch "$run_id" --repo ${org}/roboshop-regression-tests --exit-status
+      - name: status-uat-regression-tests
+        if: always() && (steps.uat-regression-tests.outcome == 'success' || steps.uat-regression-tests.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.uat-regression-tests.outcome }}
+          context: uat-regression-tests
+          description: ${{ steps.uat-regression-tests.outcome == 'success' && 'roboshop-regression-tests passed' || 'roboshop-regression-tests failed' }}
+          token: ${{ github.token }}
+          sha: ${{ inputs.commit_id }}
+      - name: transition-jira-uat-done
+        if: steps.uat-regression-tests.outcome == 'success' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'UAT Done'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+      - name: transition-jira-uat-failed-regression
+        if: failure() && steps.uat-regression-tests.outcome == 'failure' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'UAT Failed'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+
+  # mirrors 'validate-commit-status' + 'change-request-check' (minus the
+  # blocking `input` — that's the prod-cr-approval job below)
+  prod-cr-check:
+    if: inputs.environment == 'prod'
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    steps:
+      - name: validate-commit-status
+        run: |
+          set -e
+          if [ -z "${{ inputs.commit_id }}" ]; then
+            echo "commit_id is required when deploying to prod"
+            exit 1
+          fi
+          if [ -z "${{ inputs.cr_number }}" ]; then
+            echo "cr_number is required for a prod deploy"
+            exit 1
+          fi
+          if [ -z "${{ inputs.version }}" ]; then
+            echo "version is required for a prod deploy"
+            exit 1
+          fi
+
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/commits/${{ inputs.commit_id }}/status" \
+            -o commit-status.json
+
+          failed=0
+          for ctx in dev-deploy api-tests sit-deploy sit-integration-tests uat-deploy uat-regression-tests; do
+            state=$(jq -r --arg ctx "$ctx" '.statuses[] | select(.context == $ctx) | .state' commit-status.json | head -n1)
+            echo "context=$ctx state=${state:-missing}"
+            [ "$state" == "success" ] || failed=1
+          done
+          [ "$failed" -eq 0 ] || { echo "One or more required status checks are not successful for commit ${{ inputs.commit_id }}"; exit 1; }
+
+      # Dummy deployment-window check — placeholder until this is wired up to
+      # a real CR system. Blocks weekend prod deploys for now.
+      - name: change-request-window-check
+        run: |
+          set -e
+          day_of_week=$(date +%u)
+          if [ "$day_of_week" -ge 6 ]; then
+            echo "CR ${{ inputs.cr_number }}: outside the approved deployment window (no weekend prod deploys) — dummy check, replace with a real CR window lookup"
+            exit 1
+          fi
+          echo "CR ${{ inputs.cr_number }}: within deployment window"
+
+  # mirrors the `input` step — configure a GitHub Environment named
+  # 'prod-cr-approval' on the calling repo with required reviewers for the
+  # same manual-gate behavior (Settings -> Environments).
+  prod-cr-approval:
+    if: inputs.environment == 'prod'
+    needs: prod-cr-check
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    environment:
+      name: prod-cr-approval
+    steps:
+      - name: approved
+        run: echo "Approved prod deploy of ${component}@${{ inputs.commit_id }} as ${{ inputs.version }} under CR ${{ inputs.cr_number }}"
+
+  # mirrors 'prod-deploy' — rolls back only if a prior release already exists
+  # (a failed first-ever deploy has nothing behind it)
+  prod-deploy:
+    if: inputs.environment == 'prod'
+    needs: prod-cr-approval
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    permissions:
+      statuses: write
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v4
+
+      - name: prod-deploy
+        id: prod-deploy
+        run: |
+          aws eks update-kubeconfig --name roboshop --region ${aws_region}
+
+          if helm status ${component} -n roboshop-prod > /dev/null 2>&1; then
+            release_exists=true
+          else
+            release_exists=false
+          fi
+
+          if helm upgrade --install ${component} ./helm \
+              -f ./helm/values-prod.yaml \
+              --namespace roboshop-prod \
+              --create-namespace \
+              --set deployment.imageVersion=${{ inputs.commit_id }} \
+              --wait --timeout 5m \
+            && kubectl rollout status deployment/${component} -n roboshop-prod --timeout=120s; then
+            echo "deployed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            if [ "$release_exists" = true ]; then
+              echo "prod-deploy failed on an existing release — rolling back ${component} in roboshop-prod"
+              helm rollback ${component} 0 -n roboshop-prod --wait --timeout 5m
+            else
+              echo "prod-deploy failed on the first-ever release of ${component} — nothing to roll back to"
+            fi
+            exit 1
+          fi
+      - name: status-prod-deploy
+        if: always() && (steps.prod-deploy.outcome == 'success' || steps.prod-deploy.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.prod-deploy.outcome }}
+          context: prod-deploy
+          description: ${{ steps.prod-deploy.outcome == 'success' && format('Deployed {0} to roboshop-prod (CR {1})', inputs.commit_id, inputs.cr_number) || 'Deploy to roboshop-prod failed' }}
+          token: ${{ github.token }}
+          sha: ${{ inputs.commit_id }}
+      - name: transition-jira-prod-failed
+        if: failure() && steps.prod-deploy.outcome == 'failure' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'PROD failed'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
+
+  # mirrors 'tag-release' — only reached if prod-deploy succeeded, since
+  # `needs:` stops the chain the same way a failed stage stops a declarative
+  # pipeline. Scoped to this repo, so github.token is enough (no GH_PAT needed).
+  tag-release:
+    if: inputs.environment == 'prod'
+    needs: prod-deploy
+    runs-on:
+      group: roboshop
+      labels: nodejs-dev
+    permissions:
+      contents: write
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: tag-release
+        id: tag-release
+        run: |
+          set -e
+          gh api --method POST "repos/${{ github.repository }}/git/refs" \
+            -f ref="refs/tags/${{ inputs.version }}" \
+            -f sha="${{ inputs.commit_id }}"
+          echo "Tagged ${{ inputs.commit_id }} as ${{ inputs.version }} (CR ${{ inputs.cr_number }})"
+      - name: status-tag-release
+        if: always() && (steps.tag-release.outcome == 'success' || steps.tag-release.outcome == 'failure')
+        uses: daws-90s/workflows/.github/actions/commit-status@main
+        with:
+          state: ${{ steps.tag-release.outcome }}
+          context: tag-release
+          description: ${{ steps.tag-release.outcome == 'success' && format('Tagged as {0}', inputs.version) || 'Tagging release failed' }}
+          token: ${{ github.token }}
+          sha: ${{ inputs.commit_id }}
+      - name: transition-jira-completed
+        if: steps.tag-release.outcome == 'success' && inputs.issue_key != ''
+        uses: daws-90s/workflows/.github/actions/jira-transition-issue@main
+        with:
+          issue_key: ${{ inputs.issue_key }}
+          target_status: 'Completed'
+          jira_base_url: ${{ secrets.JIRA_BASE_URL }}
+          jira_email: ${{ secrets.JIRA_EMAIL }}
+          jira_api_token: ${{ secrets.JIRA_API_TOKEN }}
