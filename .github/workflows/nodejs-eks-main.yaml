@@ -56,6 +56,10 @@ on:
     secrets:
       GH_PAT:
         required: true
+      ARGOCD_SERVER:
+       required: true
+      ARGOCD_AUTH_TOKEN:
+       required: true
 
 env:
   project: ${{ inputs.project }}
@@ -78,6 +82,7 @@ jobs:
       statuses: write
     outputs:
       app_version: ${{ steps.version.outputs.app_version }}
+
     steps:
       - name: checkout code
         uses: actions/checkout@v4
@@ -86,27 +91,59 @@ jobs:
         id: version
         run: echo "app_version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
-      - name: dev-deploy
-        id: dev-deploy
+      # Checkout GitOps repository
+      - name: checkout catalogue-config
+        uses: actions/checkout@v4
+        with:
+          repository: srikanth-8651/catalogue-config
+          token: ${{ secrets.GH_PAT }}
+          path: catalogue-config
+
+      # Update image version in GitOps repository
+      - name: update-dev-image
+        working-directory: catalogue-config
+        env:
+          APP_VERSION: ${{ steps.version.outputs.app_version }}
         run: |
           set -e
-          aws eks update-kubeconfig --name roboshop --region ${aws_region}
 
-          helm upgrade --install ${component} ./helm \
-            -f ./helm/values-dev.yaml \
-            --namespace roboshop-dev \
-            --create-namespace \
-            --set deployment.imageVersion=${{ steps.version.outputs.app_version }} \
-            --wait --timeout 5m
+          yq -i '.deployment.imageVersion = strenv(APP_VERSION)' values-dev.yaml
 
-          kubectl rollout status deployment/${component} -n roboshop-dev --timeout=120s
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add values-dev.yaml
+
+          if git diff --cached --quiet; then
+            echo "Image version is already updated"
+          else
+            git commit -m "Deploy catalogue ${APP_VERSION} to DEV"
+            git push origin main
+          fi
+
+      # Deploy through Argo CD
+      - name: dev-deploy
+        id: dev-deploy
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+        run: |
+          set -e
+
+          argocd app sync roboshop-dev --insecure
+          argocd app wait roboshop-dev \
+            --health \
+            --timeout 300 \
+            --insecure
+
+      # Update GitHub commit status
       - name: status-dev-deploy
         if: always() && (steps.dev-deploy.outcome == 'success' || steps.dev-deploy.outcome == 'failure')
         uses: srikanth-8651/workflows/.github/actions/commit-status@main
         with:
           state: ${{ steps.dev-deploy.outcome }}
           context: dev-deploy
-          description: ${{ steps.dev-deploy.outcome == 'success' && 'Deployed to roboshop-dev' || 'Deploy to roboshop-dev failed' }}
+          description: ${{ steps.dev-deploy.outcome == 'success' && 'Deployed to roboshop-dev through Argo CD' || 'Argo CD deployment to roboshop-dev failed' }}
           token: ${{ github.token }}
 
       - name: api-tests
