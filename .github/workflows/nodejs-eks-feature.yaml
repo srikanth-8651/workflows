@@ -54,9 +54,9 @@ jobs:
       group: roboshop  #runner
       labels: nodejs-dev  #Labels
     permissions:
-      statuses: write  #Github status updated
-      # contents: write
-      # pull-requests: write
+      statuses: write  #Github status updated 
+      contents: write #Checkout repository code
+      pull-requests: write  #Create and update Pull Requests
     steps:
       - name: checkout code  #tsa custom actions like git clone getting all files
         uses: actions/checkout@v4
@@ -229,15 +229,16 @@ jobs:
       # catalogue ArgoCD Application pick it up. imageName is constant
       # (already seeded in catalogue-config) — only imageVersion changes per
       # deploy, so that's the only key touched here.
+
+      ##here we are deploying by getting catalogue-config file here
       - name: checkout catalogue-config
         uses: actions/checkout@v4
         with:
           repository: ${{ env.org }}/catalogue-config
           token: ${{ secrets.GH_PAT }}
           path: catalogue-config
-#so here we setting our image version 
-      
-   
+
+#so here we setting our image version to our catalogue-config file insude values-dev
       - name: update-config-repo
         id: gitops-update
         working-directory: catalogue-config
@@ -336,6 +337,7 @@ jobs:
       # mirrors 'api-tests' stage — same cross-job hand-off as Jenkins'
       # `build job: 'ROBOSHOP/catalogue-api-tests'`, just via a workflow_dispatch
       # in that repo (owned by SDET) instead of a Jenkins job
+      
       - name: trigger catalogue-api-tests
         id: api-tests
         env:
