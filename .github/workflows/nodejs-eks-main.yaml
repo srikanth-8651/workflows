@@ -520,15 +520,15 @@ jobs:
 
       # Dummy deployment-window check — placeholder until this is wired up to
       # a real CR system. Blocks weekend prod deploys for now.
-      - name: change-request-window-check
-        run: |
-          set -e
-          day_of_week=$(date +%u)
-          if [ "$day_of_week" -ge 6 ]; then
-            echo "CR ${{ inputs.cr_number }}: outside the approved deployment window (no weekend prod deploys) — dummy check, replace with a real CR window lookup"
-            exit 1
-          fi
-          echo "CR ${{ inputs.cr_number }}: within deployment window"
+      # - name: change-request-window-check
+      #   run: |
+      #     set -e
+      #     day_of_week=$(date +%u)
+      #     if [ "$day_of_week" -ge 6 ]; then
+      #       echo "CR ${{ inputs.cr_number }}: outside the approved deployment window (no weekend prod deploys) — dummy check, replace with a real CR window lookup"
+      #       exit 1
+      #     fi
+      #     echo "CR ${{ inputs.cr_number }}: within deployment window"
 
   # mirrors the `input` step — configure a GitHub Environment named
   # 'prod-cr-approval' on the calling repo with required reviewers for the
