@@ -316,14 +316,14 @@ jobs:
       #     gh run watch "$run_id" --repo ${org}/roboshop-integration-tests --exit-status
           
       # - name: status-sit-integration-tests
-        if: always() && (steps.sit-integration-tests.outcome == 'success' || steps.sit-integration-tests.outcome == 'failure')
-        uses: srikanth-8651/workflows/.github/actions/commit-status@main
-        with:
-          state: ${{ steps.sit-integration-tests.outcome }}
-          context: sit-integration-tests
-          description: ${{ steps.sit-integration-tests.outcome == 'success' && 'roboshop-integration-tests passed' || 'roboshop-integration-tests failed' }}
-          token: ${{ github.token }}
-          sha: ${{ inputs.commit_id }}
+        # if: always() && (steps.sit-integration-tests.outcome == 'success' || steps.sit-integration-tests.outcome == 'failure')
+        # uses: srikanth-8651/workflows/.github/actions/commit-status@main
+        # with:
+        #   state: ${{ steps.sit-integration-tests.outcome }}
+        #   context: sit-integration-tests
+        #   description: ${{ steps.sit-integration-tests.outcome == 'success' && 'roboshop-integration-tests passed' || 'roboshop-integration-tests failed' }}
+        #   token: ${{ github.token }}
+        #   sha: ${{ inputs.commit_id }}
  
   # Actually Its testing team work so i test logtime now i make it as
       - name: sit-integration-tests
@@ -389,7 +389,7 @@ jobs:
             --wait --timeout 5m
 
           kubectl rollout status deployment/${component} -n roboshop-uat --timeout=120s
-          
+
       - name: status-uat-deploy
         if: always() && (steps.uat-deploy.outcome == 'success' || steps.uat-deploy.outcome == 'failure')
         uses: srikanth-8651/workflows/.github/actions/commit-status@main
