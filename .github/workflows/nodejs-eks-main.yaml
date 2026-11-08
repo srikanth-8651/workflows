@@ -341,6 +341,7 @@ jobs:
           description: roboshop-integration-tests completed successfully
           token: ${{ github.token }}
           sha: ${{ inputs.commit_id }}
+
  # mirrors 'validate-commit-status' + 'uat-deploy' + 'uat-regression-tests'
   uat:
     if: inputs.environment == 'uat'
@@ -419,11 +420,12 @@ jobs:
         with:
           namespace: roboshop-sit
           component: user
+
       - name: get-pod-ip shipping
         id: pod-shipping
         uses: srikanth-8651/workflows/.github/actions/get-pod-ip@main
         with:
-          namespace: roboshop-uat
+          namespace: roboshop-sit
           component: shipping
       - name: get-pod-ip payment
         id: pod-payment
