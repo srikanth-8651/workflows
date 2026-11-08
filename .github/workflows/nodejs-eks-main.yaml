@@ -45,12 +45,12 @@ on:
         default: ''
       cr_number:
         description: 'Change Request number (required for prod deploy)'
-        required: true
+        required: false
         type: string
         default: ''
       version:
         description: 'Release version to tag the commit with on a successful prod deploy, e.g. v1.4.0 (required for prod deploy)'
-        required: true
+        required: false
         type: string
         default: ''
     secrets:
