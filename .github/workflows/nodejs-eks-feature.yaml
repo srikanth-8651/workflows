@@ -40,6 +40,7 @@ on:
       ARGOCD_AUTH_TOKEN:
         required: true
 
+##These values are shared throughout the workflow...
 env:
   project: ${{ inputs.project }}
   component: ${{ inputs.component }}
@@ -273,6 +274,7 @@ jobs:
       # just pushed (don't wait on the 45s auto-sync poll) and fail the
       # workflow if it isn't Healthy within 5 minutes
 
+##we done Deploy by ARgocd-v1 for our catalogue now we sync for this
       - name: sync-and-wait-argocd
         id: sync-and-wait-argocd
         env:
@@ -287,7 +289,7 @@ jobs:
           argocd app sync ${{ inputs.argocd-app }} --insecure
           argocd app wait ${{ inputs.argocd-app }} --health --timeout 300 --insecure
 
-
+# we are checking the status of catalogue 
       - name: status-dev-deploy
         if: steps.sync-and-wait-argocd.outcome == 'success' || steps.sync-and-wait-argocd.outcome == 'failure'
         uses: srikanth-8651/workflows/.github/actions/commit-status@main
@@ -303,6 +305,9 @@ jobs:
       # resolver. Resolved via the ArgoCD API (resource-tree + resource
       # endpoints) instead of kubectl, so the runner doesn't need its own
       # cluster credentials.
+
+      ##for API testing pipeline runs outside the Kubernetes cluster.It needs an address 
+      #to access the Catalogue application.The workflow gets the pod details from the ArgoCD API.
       - name: get-catalogue-endpoint
         id: endpoint
         env:

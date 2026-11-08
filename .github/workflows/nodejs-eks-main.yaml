@@ -193,6 +193,7 @@ jobs:
           docker pull ${registry}/${project}/${component}:${{ needs.dev-deploy.outputs.app_version }}
           docker tag ${registry}/${project}/${component}:${{ needs.dev-deploy.outputs.app_version }} ${registry}/${project}/${component}:${{ github.sha }}
           docker push ${registry}/${project}/${component}:${{ github.sha }}
+
       - name: status-promote-image
         if: always() && (steps.promote-image.outcome == 'success' || steps.promote-image.outcome == 'failure')
         uses: srikanth-8651/workflows/.github/actions/commit-status@main
@@ -248,6 +249,7 @@ jobs:
             --namespace roboshop-sit \
             --create-namespace \
             --set deployment.imageVersion=${{ inputs.commit_id }} \
+            --force-conflicts \
             --wait --timeout 5m
 
           kubectl rollout status deployment/${component} -n roboshop-sit --timeout=120s
@@ -268,6 +270,7 @@ jobs:
         with:
           namespace: roboshop-sit
           component: catalogue
+
       - name: get-pod-ip cart
         id: pod-cart
         uses: srikanth-8651/workflows/.github/actions/get-pod-ip@main
